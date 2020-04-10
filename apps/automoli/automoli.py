@@ -10,7 +10,8 @@ from datetime import time
 from typing import Any, Dict, List, Optional, Set, Union
 
 import hassapi as hass
-
+import math
+import time as t
 
 APP_NAME = "AutoMoLi"
 APP_ICON = "💡"
@@ -30,6 +31,7 @@ DEFAULT_DAYTIMES = [
     dict(starttime="20:30", name="evening", light=90),
     dict(starttime="22:30", name="night", light=0),
 ]
+DEFAULT_FADE_DURATION = 5
 
 EVENT_MOTION_XIAOMI = "xiaomi_aqara.motion"
 
@@ -87,7 +89,14 @@ class AutoMoLi(hass.Hass):  # type: ignore
         }
 
         # on/off switch via input.boolean
-        self.disable_switch_entity = self.args.get("disable_switch_entity")
+        self.disable_switch_entity = self.args.get("disable_switch_entity", [])
+        # print (*self.disable_switch_entity)
+
+        # fade on/off delay 
+        self.fadeSetting = {
+            "on": self.args.get("fade_on", DEFAULT_FADE_DURATION),
+            "off": self.args.get("fade_off", DEFAULT_FADE_DURATION)
+        }
 
         # currently active daytime settings
         self.active: Dict[str, Union[int, str]] = {}
@@ -192,6 +201,62 @@ class AutoMoLi(hass.Hass):  # type: ignore
                     icon=DAYTIME_SWITCH_ICON,
                 )
 
+    ########################## twu: additional features #############################################
+    def eval_disable_switch_conf(self, confLine):
+        # map(str.strip, my_list)
+        conf = confLine.split(';')  # split each conf elements 
+        entity, disableStat = map(str.strip, conf[0].split(',')) # get entity and disableState
+        
+        rtn = True # True: to disable
+
+        # 1. check the status
+        # if status is not true: no need to check att 
+        print ('State to satisfy: {} => {}, curr: {}'.format(entity, disableStat, self.get_state(entity)))
+        for attConf in conf[1:]:
+            att, attStat = map(str.strip, attConf.split(','))
+
+            # debug message 
+            print ('Attribute to satisfy: {}: {} => {}, curr: {}'.format(entity, att, attStat, self.get_state(entity, att)))
+
+        if self.get_state(entity) == disableStat:
+            # else go through the attributes if any 
+            for attConf in conf[1:]:
+                att, attStat = map(str.strip, attConf.split(','))
+                currAtt = self.get_state(entity, att)
+                if (currAtt != attStat) or (currAtt is None and currAtt == attStat):
+                    rtn = False
+                    break
+        else:
+            rtn = False
+        return rtn        
+
+    def fade(self, entity, direction, targetBrightnessPct, duration):
+        # bound = self.active["light_setting"] if direction == "up" else 0  #target brightness in setting 
+        targetBrightness = targetBrightnessPct * 255 / 100
+        adjFrequency = 0.2
+        adjPoints = duration / adjFrequency
+        initBrightness = self.get_state(entity, "brightness")
+        initBrightness = initBrightness if initBrightness is not None else 0
+        step = (targetBrightness - initBrightness if direction == "up" else initBrightness) // adjPoints  # using int division
+        
+        print (initBrightness, targetBrightness, step)
+        print (type(initBrightness), type(targetBrightness), type(step))
+        
+        for b in range(int(initBrightness), int(targetBrightness), int(step)):
+            self.call_service(
+                "homeassistant/turn_on",
+                entity_id = entity,
+                brightness = b,
+            )
+            t.sleep(adjFrequency)
+
+        # self.adu.log(
+        #     f"{hl(self.room.capitalize())} turned {hl(f'on')} → "
+        #     f"brightness: {hl(self.active['light_setting'])}%",
+        #     icon=ON_ICON,
+        # )
+    ########################## twu: end of additional  #############################################
+
     def motion_cleared(
         self, entity: str, attribute: str, old: str, new: str, kwargs: Dict[str, Any]
     ) -> None:
@@ -233,9 +298,14 @@ class AutoMoLi(hass.Hass):  # type: ignore
         )
 
         # check if automoli is disabled via home assistant entity
-        if self.get_state(self.disable_switch_entity) == "off":
-            self.adu.log(f"AutoMoLi disabled via {self.disable_switch_entity}",)
-            return
+        for lineStr in self.disable_switch_entity:
+            if self.eval_disable_switch_conf(lineStr):
+                self.adu.log(f"AutoMoLi disabled via {lineStr}",)
+                return
+
+        # if self.get_state(self.disable_switch_entity) == "off":
+        #     self.adu.log(f"AutoMoLi disabled via {self.disable_switch_entity}",)
+        #     return
 
         # turn on the lights if not already
         if not any([self.get_state(light) == "on" for light in self.lights]):
@@ -315,11 +385,19 @@ class AutoMoLi(hass.Hass):  # type: ignore
                     if entity.startswith("switch."):
                         self.call_service("homeassistant/turn_on", entity_id=entity)
                     else:
-                        self.call_service(
-                            "homeassistant/turn_on",
-                            entity_id=entity,
-                            brightness_pct=self.active["light_setting"],
-                        )
+                        ####################################### call fade on
+                        # self.call_service(
+                        #     "homeassistant/turn_on",
+                        #     entity_id=entity,
+                        #     brightness_pct=self.active["light_setting"],
+                        # )
+                        # entity, direction, targetBrightnessPct, duration
+                        targetBrightnessPct = self.active['light_setting']
+                        fadeDuration = self.fadeSetting["on"]
+                        
+
+                        
+                        self.fade(entity, "up", targetBrightnessPct, fadeDuration)
 
                         self.adu.log(
                             f"{hl(self.room.capitalize())} turned {hl(f'on')} → "
@@ -337,9 +415,14 @@ class AutoMoLi(hass.Hass):  # type: ignore
         """Turn off the lights."""
 
         # check if automoli is disabled via home assistant entity
-        if self.get_state(self.disable_switch_entity) == "off":
-            self.adu.log(f"AutoMoLi disabled via {self.disable_switch_entity}",)
-            return
+        for lineStr in self.disable_switch_entity:
+            if self.eval_disable_switch_conf(lineStr):
+                self.adu.log(f"AutoMoLi disabled via {lineStr}",)
+                return
+
+        # if self.get_state(self.disable_switch_entity) == "off":
+        #     self.adu.log(f"AutoMoLi disabled via {self.disable_switch_entity}",)
+        #     return
 
         blocker: Any = None
 
@@ -364,7 +447,9 @@ class AutoMoLi(hass.Hass):  # type: ignore
             self.cancel_timer(self._handle)
             if any([(self.get_state(entity)) == "on" for entity in self.lights]):
                 for entity in self.lights:
-                    self.turn_off(entity)
+                    # self.turn_off(entity)
+                    ################## call fade 
+                    self.fade(entity, "down", 0, self.fadeSetting["off"])
                 self.adu.log(
                     f"no motion in {hl(self.room.capitalize())} since "
                     f"{hl(self.active['delay'])}s → turned {hl(f'off')}",
