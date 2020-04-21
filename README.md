@@ -11,6 +11,10 @@ Fully *automatic light management* based on motion as [AppDaemon](https://github
 * switches lights **and** plugs (with lights)
 * supports **illumination sensors** to switch the light just if needed
 * supports **humidity sensors** as blocker (the "*shower case*")
+* supports `fading`: fade_on, fade_off 
+* supports `attributes` in disable swtich entity 
+* supports `sun` as daytimes
+
 
 ## Installation
 
@@ -53,7 +57,11 @@ bathroom:
   module: automoli
   class: AutoMoLi
   room: bathroom
-  disable_switch_entity: input_boolean.automoli
+  disable_switch_entity: 
+    - input_boolean.automoli
+    - input_boolean.automate_lights_livingroom,off
+    - media_player.livingroom_atv,playing; media_content_type,video
+    
   delay: 180
   motion_state_on: "on"
   motion_state_off: "off"
@@ -70,6 +78,10 @@ bathroom:
     - switch.plug_68fe8b4c9fa1
   motion:
     - binary_sensor.motion_sensor_158d033224e141
+
+  fade_on: 7  
+  fade_off: 20 
+
 ```
 
 key | optional | type | default | description

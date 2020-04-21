@@ -2,6 +2,7 @@
    Automatic Motion Lights
 
   @benleb / https://github.com/benleb/ad-automoli
+  @https://github.com/efurban/ad-automoli
 """
 
 __version__ = "0.6.1"
@@ -31,7 +32,7 @@ DEFAULT_DAYTIMES = [
     dict(starttime="20:30", name="evening", light=90),
     dict(starttime="22:30", name="night", light=0),
 ]
-DEFAULT_FADE_DURATION = 5
+DEFAULT_FADE_DURATION = 3
 
 EVENT_MOTION_XIAOMI = "xiaomi_aqara.motion"
 
@@ -207,54 +208,68 @@ class AutoMoLi(hass.Hass):  # type: ignore
         conf = confLine.split(';')  # split each conf elements 
         entity, disableStat = map(str.strip, conf[0].split(',')) # get entity and disableState
         
-        rtn = True # True: to disable
+        rtn = False # True: to disable
 
         # 1. check the status
         # if status is not true: no need to check att 
-        print ('State to satisfy: {} => {}, curr: {}'.format(entity, disableStat, self.get_state(entity)))
-        for attConf in conf[1:]:
-            att, attStat = map(str.strip, attConf.split(','))
+        # print ('State to satisfy: {} => {}, curr: {}'.format(entity, disableStat, self.get_state(entity)))
+        # for attConf in conf[1:]:
+        #     att, attStat = map(str.strip, attConf.split(','))
+        #     # debug message 
+        #     print ('Attribute to disable auto: {}: {} => {}, curr: {}'.format(entity, att, attStat, self.get_state(entity, att)))
 
-            # debug message 
-            print ('Attribute to satisfy: {}: {} => {}, curr: {}'.format(entity, att, attStat, self.get_state(entity, att)))
-
+        # print (' ==> {} att len = {}'.format(self.get_state(entity), len(conf[1:])) ) 
         if self.get_state(entity) == disableStat:
             # else go through the attributes if any 
+            statCond = True
+            attCond = False 
+            if (len(conf[1:]) == 0):
+                attCond = True
+            
             for attConf in conf[1:]:
                 att, attStat = map(str.strip, attConf.split(','))
                 currAtt = self.get_state(entity, att)
-                if (currAtt != attStat) or (currAtt is None and currAtt == attStat):
-                    rtn = False
+                if (currAtt == attStat or (currAtt is None and "None" == attStat)):
+                    print('attributes satisfied to disable automation')
+                    attCond = True
                     break
+            if (attCond and statCond):
+                rtn = True
         else:
             rtn = False
+        # print ('return val of eval_disable_switch_conf {} => {} '.format(confLine, rtn))
         return rtn        
 
-    def fade(self, entity, direction, targetBrightnessPct, duration):
+    async def fade(self, entity, direction, targetBrightnessPct, duration):
         # bound = self.active["light_setting"] if direction == "up" else 0  #target brightness in setting 
         targetBrightness = targetBrightnessPct * 255 / 100
         adjFrequency = 0.2
         adjPoints = duration / adjFrequency
-        initBrightness = self.get_state(entity, "brightness")
+        initBrightness = await self.get_state(entity, "brightness")
         initBrightness = initBrightness if initBrightness is not None else 0
-        step = (targetBrightness - initBrightness if direction == "up" else initBrightness) // adjPoints  # using int division
+        step = int(math.ceil ((float(targetBrightness) - float(initBrightness) if direction == "up" else -1.0 * float(initBrightness)) / float(adjPoints) ) ) # using int division
         
-        print (initBrightness, targetBrightness, step)
-        print (type(initBrightness), type(targetBrightness), type(step))
+        # print (initBrightness, targetBrightness, step, direction, duration)
+        # print (type(initBrightness), type(targetBrightness), type(step))
         
-        for b in range(int(initBrightness), int(targetBrightness), int(step)):
-            self.call_service(
+        if (step != 0):
+            for b in range(int(initBrightness), int(targetBrightness), int(step)):
+                await self.call_service(
+                    "homeassistant/turn_on",
+                    entity_id = entity,
+                    brightness = b,
+                )
+                t.sleep(adjFrequency)
+        await self.call_service(
                 "homeassistant/turn_on",
                 entity_id = entity,
-                brightness = b,
+                brightness = int(targetBrightness),
             )
-            t.sleep(adjFrequency)
-
         # self.adu.log(
         #     f"{hl(self.room.capitalize())} turned {hl(f'on')} → "
         #     f"brightness: {hl(self.active['light_setting'])}%",
         #     icon=ON_ICON,
-        # )
+        #) 
     ########################## twu: end of additional  #############################################
 
     def motion_cleared(
@@ -395,9 +410,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
                         targetBrightnessPct = self.active['light_setting']
                         fadeDuration = self.fadeSetting["on"]
                         
-
-                        
-                        self.fade(entity, "up", targetBrightnessPct, fadeDuration)
+                        self.create_task(self.fade(entity, "up", targetBrightnessPct, fadeDuration))
 
                         self.adu.log(
                             f"{hl(self.room.capitalize())} turned {hl(f'on')} → "
@@ -449,7 +462,7 @@ class AutoMoLi(hass.Hass):  # type: ignore
                 for entity in self.lights:
                     # self.turn_off(entity)
                     ################## call fade 
-                    self.fade(entity, "down", 0, self.fadeSetting["off"])
+                    self.create_task(self.fade(entity, "down", 0, self.fadeSetting["off"]))
                 self.adu.log(
                     f"no motion in {hl(self.room.capitalize())} since "
                     f"{hl(self.active['delay'])}s → turned {hl(f'off')}",
@@ -488,7 +501,9 @@ class AutoMoLi(hass.Hass):  # type: ignore
 
             dt_start: time
             try:
-                dt_start = time.fromisoformat(str(daytime.get("starttime")))
+                # dt_start = time.fromisoformat(str(daytime.get("starttime")))
+                dt_start = self.parse_time(daytime.get("starttime"), aware=True)
+                print (f'{daytime.get("starttime")} => start time = {dt_start}')
             except ValueError as error:
                 raise ValueError(f"missing start time in daytime '{dt_name}': {error}")
 
@@ -502,10 +517,10 @@ class AutoMoLi(hass.Hass):  # type: ignore
             )
 
             # info about next daytime
-            next_dt_start = time.fromisoformat(
-                str(daytimes[(idx + 1) % len(daytimes)].get("starttime"))
-            )
-
+            # next_dt_start = time.fromisoformat(
+            #     str(daytimes[(idx + 1) % len(daytimes)].get("starttime"))
+            # )
+            next_dt_start = daytimes[(idx + 1) % len(daytimes)].get("starttime")
             # collect all start times for sanity check
             if dt_start in starttimes:
                 raise ValueError(
